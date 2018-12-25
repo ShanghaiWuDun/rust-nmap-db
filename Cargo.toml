@@ -1,0 +1,11 @@
+[package]
+name = "nmap-db"
+version = "0.0.1"
+authors = ["luozijun <luozijun.assistant@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+log = "0.4"
+env_logger = "0.6.0"
+pcre  = "0.2"
+pcre2 = "0.1"
