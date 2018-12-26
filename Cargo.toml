@@ -8,4 +8,7 @@ edition = "2018"
 log = "0.4"
 env_logger = "0.6.0"
 pcre  = "0.2"
+# PCRE2_SYS_STATIC=1
 pcre2 = "0.1"
+chrono = "0.4"
+ansi_term = "0.11"
