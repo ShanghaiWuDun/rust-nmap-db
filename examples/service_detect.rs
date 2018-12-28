@@ -65,7 +65,7 @@ pub fn init() -> Result<(), SetLoggerError> {
         .map(|()| log::set_max_level(LevelFilter::Trace))
 }
 
-fn test_pcre() {
+pub fn test_pcre() {
     let ret = nmap_db::pcre2_is_match("m^Invalid request string: Request string is: \"\r\"",
         b"HTTP/1.1 400 Bad Request\r\nServer: nginx/1.15.7\r\nDate: Thu, 27 Dec 2018 07:46:34 GMT\r\nContent-Type: text/html\r\nContent-Length: 157\r\nConnection: close\r\n\r\n<html>\r\n<head><title>400 Bad Request</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<hr><center>nginx/1.15.7</center>\r\n</body>\r\n</html>\r\n");
     println!("{:?}", ret);
@@ -75,9 +75,9 @@ fn test_pcre() {
 
 fn main() {
     init().unwrap();
-    log::set_max_level(LevelFilter::Trace)
-    
-    // test_pcre();
+    log::set_max_level(LevelFilter::Trace);
+
+    test_pcre();
 
     match service_detect("127.0.0.1:80", &Protocol::Tcp) {
         Some(service) => info!("{}", service),
