@@ -16,6 +16,7 @@ pub mod db;
 pub use self::db::{ MAC_PREFIXES_DB, SERVICE_OPEN_FREQUENCY_DB, SERVICE_NAMES, SERVICE_PROBES, };
 
 
+use std::fmt;
 use std::time::{ Instant, Duration, };
 use std::net::SocketAddr;
 use std::net::TcpStream;
@@ -49,7 +50,7 @@ pub struct MacVendor {
     pub vendor: &'static str,
 }
 
-#[derive(Debug, Copy, Clone, Hash, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Copy, Clone, Hash, PartialEq, PartialOrd, Eq, Ord)]
 #[repr(u8)]
 pub enum Protocol {
     Tcp = 0u8,
@@ -82,6 +83,16 @@ impl Protocol {
         match *self {
             Sctp => true,
             _ => false,
+        }
+    }
+}
+
+impl fmt::Debug for Protocol {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Protocol::Tcp => write!(f, "tcp"),
+            Protocol::Udp => write!(f, "udp"),
+            Protocol::Sctp => write!(f, "sctp"),
         }
     }
 }
@@ -122,8 +133,13 @@ impl Service {
     }
 }
 
+impl fmt::Display for Service {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "tcp/80 {}", self.service_name())
+    }
+}
 
-#[derive(Debug, Copy, Clone, Hash, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct PortRange {
     pub start: u16,
     pub end: u16,
@@ -151,84 +167,22 @@ pub struct ServiceProbeMatchRule {
     pub versioninfo: &'static [ &'static [u8] ],
 }
 
-pub enum Match<'a> {
-    V1(pcre::Match<'a>),
-    V2(pcre2::bytes::Match<'a>),
-}
-
-pub enum Regex {
-    V1(pcre::Pcre),
-    V2(pcre2::bytes::Regex),
-}
-
-impl Regex {
-    pub fn new_v1(pattern: &str) -> Result<Self, pcre::CompilationError> {
-        let regex = pcre::Pcre::compile(&pattern)?;
-        Ok( Regex::V1(regex) )
-    }
-
-    pub fn new_v2(pattern: &str) -> Result<Self, pcre2::Error> {
-        let regex = pcre2::bytes::Regex::new(&pattern)?;
-        Ok( Regex::V2(regex) )
-    }
-
-    // pub fn captures<'a>(&mut self, subject: &'a [u8]) -> Option<Match<'a>> {
-    //     match *self {
-    //         Regex::V1(_) => {
-    //             // let s = std::str::from_utf8(subject).unwrap();
-    //             // regex.exec(&s)
-    //             //     .map(|item| Match::V1(item) )
-    //             unimplemented!()
-    //         },
-    //         Regex::V2(regex) => {
-    //             match regex.find(subject) {
-    //                 Ok(m) => m.map(|item| Match::V2(item) ),
-    //                 Err(e) => {
-    //                     error!("{:?}", e);
-    //                     None
-    //                 }
-    //             }
-    //         },
-    //     }
-    // }
-}
-
-
 
 impl ServiceProbeMatchRule {
     pub fn service_name(&self) -> &'static str {
         SERVICE_NAMES[self.service_name_index as usize]
     }
 
-    // pub fn match(&self, subject: &'s [u8]) -> Option<> {
-    //     unimplemented!()
-    // }
+    pub fn is_match(&self, subject: &[u8]) -> bool {
+        let p = self.pattern();
+        // {'m|', 'm@', 'm=', 'm%'}
+        // { '|', '|$=', '|=', '|s', '|^#', '|is', '|si', '|i'}
+        pcre2_is_match(&p, &subject)
+    }
 
     pub fn pattern(&self) -> &str {
-        std::str::from_utf8(self.pattern).unwrap()
-    }
-
-    pub fn pcre_pattern(&self) -> Result<pcre::Pcre, pcre::CompilationError> {
-        match std::str::from_utf8(self.pattern) {
-            Ok(s) => {
-                pcre::Pcre::compile(&s);
-                unimplemented!()
-            },
-            Err(e) => {
-                panic!("{:?}", e);
-            }
-        }
-    }
-
-    pub fn pcre2_pattern(&self) -> Result<pcre2::bytes::Regex, pcre2::Error> {
-        match std::str::from_utf8(self.pattern) {
-            Ok(s) => {
-                pcre2::bytes::Regex::new(&s);
-                unimplemented!()
-            },
-            Err(e) => {
-                panic!("{:?}", e);
-            }
+        unsafe {
+            std::str::from_utf8_unchecked(self.pattern)
         }
     }
 
@@ -294,7 +248,50 @@ impl ServiceProbe {
 }
 
 
+pub fn pcre_is_match(pattern: &str, subject: &[u8]) -> bool {
+    match pcre::Pcre::compile(&pattern) {
+        Ok(mut re) => {
+            debug!("{:?}", re);
+            match std::str::from_utf8(&subject) {
+                Ok(res) => {
+                    match re.exec(&res) {
+                        Some(_m) => true,
+                        None => false,
+                    }
+                },
+                Err(e) => {
+                    error!("{:?}", e);
+                    false
+                },
+            }   
+        },
+        Err(e) => {
+            error!("{:?}", e);
+            false
+        }
+    }
+}
 
+pub fn pcre2_is_match(pattern: &str, subject: &[u8]) -> bool {
+    let re = match pcre2::bytes::Regex::new(&pattern) {
+        Ok(re) => re,
+        Err(e) => {
+            error!("{:?}", e);
+            return false;
+        }
+    };
+
+    let capture_names = re.capture_names();
+    
+    match re.captures(&subject) {
+        Ok(Some(_m)) => true,
+        Ok(None) => false,
+        Err(e) => {
+            error!("{:?}", e);
+            return false;
+        }
+    }
+}
 
 pub fn service_detect<A: ToSocketAddrs>(addr: A, protocol: &Protocol) -> Option<Service> {
     assert_eq!(protocol.is_tcp() || protocol.is_udp(), true);
@@ -302,7 +299,6 @@ pub fn service_detect<A: ToSocketAddrs>(addr: A, protocol: &Protocol) -> Option<
 
     match protocol {
         &Protocol::Tcp => {
-            // Unknown
             let mut socket = TcpStream::connect_timeout(&sa, Duration::from_millis(3000)).ok()?;
             // socket.set_nonblocking(true).ok()?;
             socket.set_read_timeout(Some(Duration::from_millis(6000))).ok()?;
@@ -354,64 +350,26 @@ pub fn service_detect<A: ToSocketAddrs>(addr: A, protocol: &Protocol) -> Option<
                     continue;
                 }
 
+                debug!("Payload: {:?}", std::str::from_utf8(response).unwrap_or(&format!("{:?}", response)));
+
                 'loop2: for rule in probe.rules.iter() {
                     // if now.elapsed() > waitms {
                     //     break 'loop1;
                     // }
 
-                    let pattern = rule.pattern();
-
-                    trace!("\t{} {} {}",
+                    trace!("    {} {} {:?}",
                         if rule.is_soft_match { "SoftMatch" } else { "    Match" },
                         rule.service_name(),
-                        pattern,
+                        rule.pattern(),
                     );
 
-
-                    let re = pcre2::bytes::Regex::new(&pattern).ok()?;
-                    let capture_names = re.capture_names();
-                    match re.captures(&response).ok()? {
-                        Some(m) => {
-                            let service = Service {
-                                name_index: rule.service_name_index,
-                                protocol: protocol.clone(),
-                                port: sa.port(),
-                            };
-                            return Some(service);
-                        },
-                        None => { },
+                    if rule.is_match(&response) {
+                        return Some(Service {
+                            name_index: rule.service_name_index,
+                            protocol: protocol.clone(),
+                            port: sa.port(),
+                        });
                     }
-
-                    // 
-                    // match pcre::Pcre::compile(&pattern) {
-                    //     Ok(mut re) => {
-                    //         debug!("{:?}", re);
-                    //         match std::str::from_utf8(&response) {
-                    //             Ok(res) => {
-                    //                 match re.exec(&res) {
-                    //                     Some(m) => {
-                    //                         let service = Service {
-                    //                             name_index: rule.service_name_index,
-                    //                             protocol: protocol.clone(),
-                    //                             port: sa.port(),
-                    //                         };
-                    //                         return Some(service);
-                    //                     },
-                    //                     None => {
-
-                    //                     }
-                    //                 }
-                    //             },
-                    //             Err(e) => {
-                    //                 error!("{:?}", e);
-                    //                 continue;
-                    //             },
-                    //         }   
-                    //     },
-                    //     Err(e) => {
-                    //         error!("{:?}", e);
-                    //     }
-                    // }
                 }
 
                 probe_done.push(probe.probename);
@@ -432,5 +390,9 @@ pub fn service_detect<A: ToSocketAddrs>(addr: A, protocol: &Protocol) -> Option<
 fn test_pcre() {
     let ret = pcre::Pcre::compile(r"m=^<html>\\n<head>\\n<title>TRENDnet \\| (TEG-\\w+) \\| Login</title>=', 'p/TRENDnet $1 switch http config/");
     assert_eq!(ret.is_ok(), true);
+
+    let ret = pcre2_is_match("|^Invalid request string: Request string is: \"\r\"$|",
+        b"HTTP/1.1 400 Bad Request\r\nServer: nginx/1.15.7\r\nDate: Thu, 27 Dec 2018 07:46:34 GMT\r\nContent-Type: text/html\r\nContent-Length: 157\r\nConnection: close\r\n\r\n<html>\r\n<head><title>400 Bad Request</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<hr><center>nginx/1.15.7</center>\r\n</body>\r\n</html>\r\n");
+    assert_eq!(ret, false);
 }
 

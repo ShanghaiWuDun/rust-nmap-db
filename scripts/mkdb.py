@@ -197,7 +197,6 @@ def make_services_db():
                         if service_name:
                             service_names.add(service_name)
                         
-                        # match acap m|^\* ACAP \(IMPLEMENTATION \"CommuniGate Pro ACAP (\d[-.\w]+)\"\) | p/CommuniGate Pro ACAP server/ v/$1/ i/for mail client preference sharing/ 
                         text = " ".join(tmp[2:]).strip()
                         
                         result = get_pattern_and_versioninfo(text)
@@ -207,17 +206,13 @@ def make_services_db():
                         if len(versioninfo) == 0:
                             versioninfo = None
 
-                        
-                        if pattern.startswith("m"):
-                            rule = {
-                                "is_soft_match": True if tmp[0] == "softmatch" else False,
-                                "service_name": service_name,
-                                "pattern": pattern,
-                                "versioninfo": versioninfo,
-                            }
-                            probe["rules"].append(rule)
-                        else:
-                            print(result)
+                        rule = {
+                            "is_soft_match": True if tmp[0] == "softmatch" else False,
+                            "service_name": service_name,
+                            "pattern": pattern,
+                            "versioninfo": versioninfo,
+                        }
+                        probe["rules"].append(rule)
                 else:
                     print("[WARN] Unknow Probe Attr: %s" % line)
                 idx += 1
@@ -324,6 +319,9 @@ def make_services_db():
 
     return code
 
+starts = set()
+ends = set()
+
 def get_pattern_and_versioninfo(s):
     if not s.startswith(" "):
         s = " " + s
@@ -346,6 +344,34 @@ def get_pattern_and_versioninfo(s):
     if len(s) > 0:
         result.append(s.strip())
 
+    # {'m|', 'm@', 'm=', 'm%'}
+    # { '|', '|$=', '|=', '|s', '|^#', '|is', '|si', '|i'}
+    pcre_pattern = result[0]
+    
+    if pcre_pattern.startswith("m|"):
+        tmp = list(pcre_pattern)
+        tmp[1] = "/"
+        pcre_pattern = "".join(tmp)
+
+        for s in ('|$=', '|^#', '|is', '|si'):
+            if pcre_pattern.endswith(s):
+                tmp = list(pcre_pattern)
+                tmp[-3] = "/"
+                pcre_pattern = "".join(tmp)
+        for s in ('|=', '|s'):
+            if pcre_pattern.endswith(s):
+                tmp = list(pcre_pattern)
+                tmp[-2] = "/"
+                pcre_pattern = "".join(tmp)
+
+        if pcre_pattern.endswith("|"):
+            tmp = list(pcre_pattern)
+            tmp[-1] = "/"
+            pcre_pattern = "".join(tmp)
+
+
+    result[0] = pcre_pattern
+
     return result
 
 def make_service_names_db():
@@ -366,6 +392,7 @@ def main():
     print(make_service_open_frequency_db())
     print(make_services_db())
 
+    # make_services_db()
     # get_pattern_and_versioninfo(s)
 
 if __name__ == '__main__':
