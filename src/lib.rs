@@ -135,7 +135,7 @@ impl Service {
 
 impl fmt::Display for Service {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "tcp/80 {}", self.service_name())
+        write!(f, "{:?}/{} {}", self.protocol, self.port, self.service_name())
     }
 }
 
