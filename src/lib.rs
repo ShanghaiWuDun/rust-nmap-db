@@ -299,15 +299,17 @@ pub fn service_detect<A: ToSocketAddrs>(addr: A, protocol: &Protocol) -> Option<
 
     match protocol {
         &Protocol::Tcp => {
-            let mut socket = TcpStream::connect_timeout(&sa, Duration::from_millis(3000)).ok()?;
-            // socket.set_nonblocking(true).ok()?;
-            socket.set_read_timeout(Some(Duration::from_millis(6000))).ok()?;
-            socket.set_write_timeout(Some(Duration::from_millis(6000))).ok()?;
+            
             
             let now = Instant::now();
             let mut probe_done: Vec<&str> = Vec::new();
 
             'loop1: for probe in SERVICE_PROBES.iter() {
+                let mut socket = TcpStream::connect_timeout(&sa, Duration::from_millis(3000)).ok()?;
+                // socket.set_nonblocking(true).ok()?;
+                socket.set_read_timeout(Some(Duration::from_millis(6000))).ok()?;
+                socket.set_write_timeout(Some(Duration::from_millis(6000))).ok()?;
+                
                 if probe_done.contains(&probe.probename) {
                     continue;
                 }
@@ -356,7 +358,6 @@ pub fn service_detect<A: ToSocketAddrs>(addr: A, protocol: &Protocol) -> Option<
                     // if now.elapsed() > waitms {
                     //     break 'loop1;
                     // }
-
                     trace!("    {} {} {:?}",
                         if rule.is_soft_match { "SoftMatch" } else { "    Match" },
                         rule.service_name(),
