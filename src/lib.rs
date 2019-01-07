@@ -15,7 +15,7 @@ pub mod db;
 
 pub use self::db::{ MAC_PREFIXES_DB, SERVICE_OPEN_FREQUENCY_DB, SERVICE_NAMES, SERVICE_PROBES, };
 
-
+use std::cmp;
 use std::fmt;
 use std::time::{ Instant, Duration, };
 use std::net::SocketAddr;
@@ -102,6 +102,40 @@ pub struct ServiceOpenFrequency {
     pub service: Service,
     pub open_frequency: f64,
 }
+
+impl cmp::Ord for ServiceOpenFrequency {
+    fn cmp(&self, other: &ServiceOpenFrequency) -> cmp::Ordering {
+        assert_eq!(self.open_frequency.is_normal() || self.open_frequency == 0.0f64, true);
+        assert_eq!(other.open_frequency.is_normal() || other.open_frequency == 0.0f64, true);
+
+        if self.open_frequency == other.open_frequency {
+            cmp::Ordering::Equal
+        } else if self.open_frequency < other.open_frequency {
+            cmp::Ordering::Less
+        } else if self.open_frequency > other.open_frequency {
+            cmp::Ordering::Greater
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+impl PartialOrd for ServiceOpenFrequency {
+    fn partial_cmp(&self, other: &ServiceOpenFrequency) -> Option<cmp::Ordering> {
+        Some(self.cmp(&other))
+    }
+}
+
+impl PartialEq for ServiceOpenFrequency {
+    fn eq(&self, other: &ServiceOpenFrequency) -> bool {
+        assert_eq!(self.open_frequency.is_normal() || self.open_frequency == 0.0f64, true);
+        assert_eq!(other.open_frequency.is_normal() || other.open_frequency == 0.0f64, true);
+
+        self.open_frequency == other.open_frequency
+    }
+}
+
+impl Eq for ServiceOpenFrequency { }
 
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -244,6 +278,7 @@ impl ServiceProbe {
 
     pub fn probestring(&self) -> &str {
         std::str::from_utf8(self.probestring).unwrap()
+        // self.probestring
     }
 }
 
@@ -251,7 +286,7 @@ impl ServiceProbe {
 pub fn pcre_is_match(pattern: &str, subject: &[u8]) -> bool {
     match pcre::Pcre::compile(&pattern) {
         Ok(mut re) => {
-            debug!("{:?}", re);
+            // debug!("{:?}", re);
             match std::str::from_utf8(&subject) {
                 Ok(res) => {
                     match re.exec(&res) {
@@ -273,7 +308,84 @@ pub fn pcre_is_match(pattern: &str, subject: &[u8]) -> bool {
 }
 
 pub fn pcre2_is_match(pattern: &str, subject: &[u8]) -> bool {
-    let re = match pcre2::bytes::Regex::new(&pattern) {
+    let mut pattern = pattern;
+
+    if pattern.starts_with("m") {
+        pattern = &pattern[1..];
+    }
+
+    let start_token = &pattern[0..1];
+    
+    let mut options: Option<&str> = None;
+
+    match start_token {
+        "|" | "/" |  "=" | "@" | "%" => {
+            let tmp = &pattern[1..];
+            let mut idx = tmp.len() - 1;
+            let mut no_end = true;
+            while idx > 0 {
+                if start_token == &tmp[idx..idx+1] {
+                    // siID
+                    let opts = &tmp[idx+1..];
+                    if opts.len() > 0 {
+                        options = Some(opts);
+                    }
+                    
+                    no_end = false;
+                    pattern = &pattern[1..idx+1];
+
+                    break;
+                }
+
+                idx -= 1;
+            }
+
+            if no_end {
+                return false;
+            }
+        },
+        _ => {
+
+        },
+    }
+
+    trace!("pattern: {:?}  options: {:?}", pattern, options);
+
+    let mut caseless = false;
+    let mut dotall = false;
+    let mut multi_line = false;
+    let mut crlf = false;
+    let mut ucp = false;
+    let mut utf = false;
+
+    if let Some(opt) = options {
+        if opt.contains("i") {
+            caseless = true;
+        }
+
+        if opt.contains("s") {
+            dotall = true;
+        }
+
+        if opt.contains("m") {
+            multi_line = true;
+        }
+
+        if opt.contains("m") {
+            multi_line = true;
+        }
+    }
+
+    let re = pcre2::bytes::RegexBuilder::new()
+        .caseless(caseless)
+        .dotall(dotall)
+        .multi_line(multi_line)
+        .crlf(crlf)
+        .ucp(ucp)
+        .utf(utf)
+        .build(pattern);
+
+    let re = match re {
         Ok(re) => re,
         Err(e) => {
             error!("{:?}", e);
@@ -281,7 +393,7 @@ pub fn pcre2_is_match(pattern: &str, subject: &[u8]) -> bool {
         }
     };
 
-    let capture_names = re.capture_names();
+    let _capture_names = re.capture_names();
     
     match re.captures(&subject) {
         Ok(Some(_m)) => true,
@@ -293,107 +405,7 @@ pub fn pcre2_is_match(pattern: &str, subject: &[u8]) -> bool {
     }
 }
 
+
 pub fn service_detect<A: ToSocketAddrs>(addr: A, protocol: &Protocol) -> Option<Service> {
-    assert_eq!(protocol.is_tcp() || protocol.is_udp(), true);
-    let sa = addr.to_socket_addrs().ok()?.next()?;
-
-    match protocol {
-        &Protocol::Tcp => {
-            
-            
-            let now = Instant::now();
-            let mut probe_done: Vec<&str> = Vec::new();
-
-            'loop1: for probe in SERVICE_PROBES.iter() {
-                let mut socket = TcpStream::connect_timeout(&sa, Duration::from_millis(3000)).ok()?;
-                // socket.set_nonblocking(true).ok()?;
-                socket.set_read_timeout(Some(Duration::from_millis(6000))).ok()?;
-                socket.set_write_timeout(Some(Duration::from_millis(6000))).ok()?;
-                
-                if probe_done.contains(&probe.probename) {
-                    continue;
-                }
-
-                assert_eq!(probe.probestring.len() >= 3, true);
-
-                let waitms = Duration::from_millis(probe.totalwaitms.unwrap_or(3000));
-                let pkt: &[u8] = &probe.probestring[2..probe.probestring.len()-1];
-                let pkt_str = std::str::from_utf8(pkt).unwrap();
-
-                trace!("Probe {:?} {}: {:?}",
-                        protocol,
-                        probe.probename,
-                        pkt_str,
-                );
-
-                if pkt.len() > 0 {
-                    match socket.write_all(&pkt) {
-                        Ok(_) => { },
-                        Err(e) => {
-                            error!("{:?}", e);
-                            continue;
-                        }
-                    };
-                }
-
-                // std::thread::sleep(waitms);
-
-                let mut response_buffer = [0u8; 10240];
-                let amt = match socket.read(&mut response_buffer) {
-                    Ok(amt) => amt,
-                    Err(e) => {
-                        error!("{:?}", e);
-                        continue;
-                    }
-                };
-                let response = &response_buffer[..amt];
-
-                if response.len() < 1 {
-                    continue;
-                }
-
-                debug!("Payload: {:?}", std::str::from_utf8(response).unwrap_or(&format!("{:?}", response)));
-
-                'loop2: for rule in probe.rules.iter() {
-                    // if now.elapsed() > waitms {
-                    //     break 'loop1;
-                    // }
-                    trace!("    {} {} {:?}",
-                        if rule.is_soft_match { "SoftMatch" } else { "    Match" },
-                        rule.service_name(),
-                        rule.pattern(),
-                    );
-
-                    if rule.is_match(&response) {
-                        return Some(Service {
-                            name_index: rule.service_name_index,
-                            protocol: protocol.clone(),
-                            port: sa.port(),
-                        });
-                    }
-                }
-
-                probe_done.push(probe.probename);
-                // TODO: fallback
-            }
-
-            return None;
-        },
-        &Protocol::Udp => {
-            unimplemented!()
-        },
-        _ => unreachable!(),
-    }
+    unimplemented!()
 }
-
-#[cfg(test)]
-#[test]
-fn test_pcre() {
-    let ret = pcre::Pcre::compile(r"m=^<html>\\n<head>\\n<title>TRENDnet \\| (TEG-\\w+) \\| Login</title>=', 'p/TRENDnet $1 switch http config/");
-    assert_eq!(ret.is_ok(), true);
-
-    let ret = pcre2_is_match("|^Invalid request string: Request string is: \"\r\"$|",
-        b"HTTP/1.1 400 Bad Request\r\nServer: nginx/1.15.7\r\nDate: Thu, 27 Dec 2018 07:46:34 GMT\r\nContent-Type: text/html\r\nContent-Length: 157\r\nConnection: close\r\n\r\n<html>\r\n<head><title>400 Bad Request</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<hr><center>nginx/1.15.7</center>\r\n</body>\r\n</html>\r\n");
-    assert_eq!(ret, false);
-}
-
