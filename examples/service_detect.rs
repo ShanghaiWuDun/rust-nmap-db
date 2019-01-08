@@ -23,6 +23,7 @@ pub use crate::nmap_db::{
 
 use std::cmp;
 use std::fmt;
+use std::env;
 use std::time::{ Instant, Duration, };
 use std::net::SocketAddr;
 use std::net::TcpStream;
@@ -96,6 +97,34 @@ struct ProbeCache {
     pub protocol: Protocol,
 }
 
+pub enum Socket {
+    Tcp(TcpStream),
+    Udp(UdpSocket),
+}
+
+impl Write for Socket {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+        match self {
+            Socket::Tcp(stream) => stream.write(buf),
+            Socket::Udp(udp_socket) => udp_socket.send(buf),
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
+impl Read for Socket {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        match self {
+            Socket::Tcp(stream) => stream.read(buf),
+            Socket::Udp(udp_socket) => udp_socket.recv(buf),
+        }
+    }
+}
+
+
 
 fn run_probe(sa: &SocketAddr, probe: &ServiceProbe, cache: &mut Vec<ProbeCache>) -> Option<Service> {
     let this_probe_cache = ProbeCache { probename: probe.probename, protocol: probe.protocol };
@@ -109,105 +138,122 @@ fn run_probe(sa: &SocketAddr, probe: &ServiceProbe, cache: &mut Vec<ProbeCache>)
     let waitms = Duration::from_millis(3000);
 
     let protocol = probe.protocol;
-    match protocol {
+
+    let mut socket = match protocol {
         Protocol::Tcp => {
-            // let mut socket = TcpStream::connect(&sa).ok()?;
-            let mut socket = TcpStream::connect_timeout(&sa, waitms).ok()?;
+            let socket = TcpStream::connect_timeout(&sa, waitms).ok()?;
             socket.set_nonblocking(false).ok()?;
             socket.set_read_timeout(Some(waitms)).ok()?;
             socket.set_write_timeout(Some(waitms)).ok()?;
             socket.set_nodelay(true).ok()?;
-            
-            let pkt: &[u8] = &probe.probestring;
-            let raw_pkt_str = format!("{:?}", &probe.probestring);
-            let pkt_str = std::str::from_utf8(pkt).unwrap_or(&raw_pkt_str);
-            
-            trace!("Probe {:?} {}: \"{}\"",
-                    protocol,
-                    probe.probename,
-                    pkt_str,
-            );
-
-            if pkt.len() > 0 {
-                match socket.write(&pkt) {
-                    Ok(_) => { },
-                    Err(e) => {
-                        error!("{:?}", e);
-                        if let Some(fallback_probe) = probe.fallback_probe() {
-                            return run_probe(sa, &fallback_probe, cache);
-                        } else {
-                            return None;
-                        }
-                    }
-                };
+            Socket::Tcp(socket)
+        },
+        Protocol::Udp => {
+            let mut socket: Option<UdpSocket> = None;
+            for p in 10000..11000 {
+                let local_addr = format!("127.0.0.1:{}", p);
+                if let Ok(soc) = UdpSocket::bind(&local_addr) {
+                    socket = Some(soc);
+                    break;
+                }
             }
             
-            // std::thread::sleep(_waitms);
+            if socket.is_none() {
+                debug!("udpsocket couldn't bind to address!");
+                return None;
+            }
 
-            let mut response_buffer = [0u8; 1024*2];
-            let amt = match socket.read(&mut response_buffer) {
-                Ok(amt) => amt,
-                Err(e) => {
-                    error!("{:?}", e);
-                    if let Some(fallback_probe) = probe.fallback_probe() {
-                        return run_probe(sa, &fallback_probe, cache);
-                    } else {
-                        return None;
-                    }
-                }
-            };
-            let response = &response_buffer[..amt];
+            let socket = socket.unwrap();
 
-            if response.len() < 1 {
+            socket.set_write_timeout(Some(waitms)).ok()?;
+            socket.set_read_timeout(Some(waitms)).ok()?;
+            socket.connect(sa).ok()?;
+
+            Socket::Udp(socket)
+        },
+        _ => unreachable!(),
+    };
+
+
+    let pkt: &[u8] = &probe.probestring;
+    let raw_pkt_str = format!("{:?}", &probe.probestring);
+    let pkt_str = std::str::from_utf8(pkt).unwrap_or(&raw_pkt_str);
+    
+    debug!("Probe {:?} {}: \"{}\"",
+            protocol,
+            probe.probename,
+            pkt_str,
+    );
+
+    if pkt.len() > 0 {
+        match socket.write(&pkt) {
+            Ok(_) => { },
+            Err(e) => {
+                error!("{:?}", e);
                 if let Some(fallback_probe) = probe.fallback_probe() {
                     return run_probe(sa, &fallback_probe, cache);
                 } else {
                     return None;
                 }
             }
-
-            debug!("Payload: {:?}", std::str::from_utf8(response).unwrap_or(&format!("{:?}", response)));
-
-            let mut soft_match = None;
-
-            'loop2: for rule in probe.rules.iter() {
-                // if now.elapsed() > waitms {
-                //     break 'loop1;
-                // }
-                trace!("    {} {} \"{}\"",
-                    if rule.is_soft_match { "SoftMatch" } else { "    Match" },
-                    rule.service_name(),
-                    rule.pattern(),
-                );
-
-                if rule.is_match(&response) {
-                    let serv = Service {
-                        name_index: rule.service_name_index,
-                        protocol: protocol.clone(),
-                        port: sa.port(),
-                    };
-
-                    if rule.is_soft_match && serv.service_name() != "unknown" {
-                        trace!("soft match: {}", serv);
-                        soft_match = Some(serv);
-                    } else {
-                        return Some(serv);
-                    }
-                }
-            }
-
-            if soft_match.is_some() {
-                return soft_match;
-            }
-
-            return None
-        },
-        Protocol::Udp => {
-            // unimplemented!()
-            None
-        },
-        _ => unreachable!(),
+        };
     }
+
+    // std::thread::sleep(_waitms);
+
+    let mut response_buffer = [0u8; 1024*2];
+    let amt = match socket.read(&mut response_buffer) {
+        Ok(amt) => amt,
+        Err(e) => {
+            error!("{:?}", e);
+            if let Some(fallback_probe) = probe.fallback_probe() {
+                return run_probe(sa, &fallback_probe, cache);
+            } else {
+                return None;
+            }
+        }
+    };
+    let response = &response_buffer[..amt];
+
+    if response.len() < 1 {
+        if let Some(fallback_probe) = probe.fallback_probe() {
+            return run_probe(sa, &fallback_probe, cache);
+        } else {
+            return None;
+        }
+    }
+
+    debug!("Payload: {:?}", std::str::from_utf8(response).unwrap_or(&format!("{:?}", response)));
+
+    let mut soft_match = None;
+
+    'loop2: for rule in probe.rules.iter() {
+        // if now.elapsed() > waitms {
+        //     break 'loop1;
+        // }
+        trace!("    {} {} \"{}\"",
+            if rule.is_soft_match { "SoftMatch" } else { "    Match" },
+            rule.service_name(),
+            rule.pattern(),
+        );
+
+        if rule.is_match(&response) {
+            let serv = Service {
+                name_index: rule.service_name_index,
+                protocol: protocol.clone(),
+                port: sa.port(),
+            };
+
+            if rule.is_soft_match && serv.service_name() != "unknown" {
+                trace!("soft match: {}", serv);
+                soft_match = Some(serv);
+            } else {
+                return Some(serv);
+            }
+        }
+    }
+
+    return soft_match;
 }
 
 fn detect<A: ToSocketAddrs>(addr: A) -> Option<Service> {
@@ -219,7 +265,7 @@ fn detect<A: ToSocketAddrs>(addr: A) -> Option<Service> {
 
     let top_services = top_service_detect(sa.port());
     
-    println!("{:?}", top_services);
+    trace!("{:?}", top_services);
 
     let mut probes_cache: Vec<ProbeCache> = Vec::new();
 
@@ -234,14 +280,11 @@ fn detect<A: ToSocketAddrs>(addr: A) -> Option<Service> {
             continue;
         }
 
-        'loop2: for probe in SERVICE_PROBES.iter() {
+        'loop2: for probe in &SERVICE_PROBES[1..] {
             for rule in probe.rules.iter() {
                 if rule.service_name_index == top_service.service.name_index
                     && probe.protocol == top_service.service.protocol {
                     if !top_probes.contains(&probe) {
-                        // println!("{:?}", top_service.service.service_name());
-                        // println!("{:?}", rule);
-                        // println!("检测到 probe: {:?}", probe.probename);
                         top_probes.push(probe);
                     }
                     break 'loop2;
@@ -254,13 +297,13 @@ fn detect<A: ToSocketAddrs>(addr: A) -> Option<Service> {
     
 
     for top_probe in top_probes {
-        debug!("快速探测: {:?} {:?}", top_probe.protocol, top_probe.probename);
+        trace!("快速探测: {:?} {:?}", top_probe.protocol, top_probe.probename);
         if let Some(service) = run_probe(&sa, top_probe, &mut probes_cache) {
             return Some(service);
         }
     }
     
-    debug!("快速探测未命中服务 ...");
+    trace!("快速探测未命中服务 ...");
 
     for probe in SERVICE_PROBES.iter() {
         if let Some(service) = run_probe(&sa, probe, &mut probes_cache) {
@@ -272,16 +315,17 @@ fn detect<A: ToSocketAddrs>(addr: A) -> Option<Service> {
 }
 
 
+#[test]
 fn test_match() {
     let payload = b"-ERR wrong number of arguments for 'get' command\r\n";
     // %abc(\w+)end%i
     // abChelloend
     let p = "|^-err wrong number of arguments for 'get' Command\r\n$|i";
-    println!("pcre2_is_match: {:?}", pcre2_is_match(p, payload));
-
+    assert_eq!(pcre2_is_match(p, payload), true);
+    
     let p = "m@^-ERR wrong number of arguments for 'get' command\r\n$@";
     println!("pcre2_is_match: {:?}", pcre2_is_match(p, payload));
-
+    
 
     let p = "m/^-ERR wrong number of arguments for 'get' command\r\n$/i";
     println!("pcre2_is_match: {:?}", pcre2_is_match(p, payload));
@@ -292,11 +336,18 @@ fn test_match() {
 
 fn main() {
     init().unwrap();
-    log::set_max_level(LevelFilter::Trace);
+    log::set_max_level(LevelFilter::Info);
 
-    // test_match();
-
-    match detect("127.0.0.1:6379") {
+    let addr = match env::args().nth(1) {
+        Some(addr) => addr,
+        None => {
+            println!("Usage:");
+            println!("\t$ ./service_detect 127.0.0.1:22");
+            return ();
+        }
+    };
+    
+    match detect(addr) {
         Some(service) => info!("{}", service),
         None => info!("Unknow"),
     }
